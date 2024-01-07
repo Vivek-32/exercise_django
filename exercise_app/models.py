@@ -39,14 +39,14 @@ class Country(models.Model):
     country_code = models.CharField(max_length=10, unique=True)
     curr_symbol = models.CharField(max_length=10)
     phone_code = models.CharField(max_length=10, unique=True)
-    my_user = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True)
+    my_user = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, related_name="country")
 
 class State(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
     state_code = models.CharField(max_length=10, unique=True)
     gst_code = models.CharField(max_length=10, unique=True)
-    country = models.ForeignKey(Country, on_delete=models.CASCADE)
+    country = models.ForeignKey(Country, on_delete=models.CASCADE, related_name="state")
 
 class City(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -57,7 +57,7 @@ class City(models.Model):
     avg_age = models.FloatField()
     num_of_adult_males = models.IntegerField()
     num_of_adult_females = models.IntegerField()
-    state = models.ForeignKey(State, on_delete=models.CASCADE)
+    state = models.ForeignKey(State, on_delete=models.CASCADE, related_name='city')
 
     def save(self, *args, **kwargs):
         if self.population < (self.num_of_adult_males + self.num_of_adult_females):
