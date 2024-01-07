@@ -1,19 +1,20 @@
 from django.shortcuts import render, HttpResponse
 from django.contrib.auth.hashers import check_password, make_password
 from django.conf import settings
-from django.middleware import csrf
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.response import Response
 from rest_framework.pagination import CursorPagination
+from rest_framework.exceptions import PermissionDenied
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.contrib.auth import authenticate, login, logout, get_user_model
 from rest_framework.permissions import  IsAuthenticated, AllowAny, BasePermission
 from django.views.decorators.csrf import csrf_exempt
 from .models import Country, State, City, CustomUser
 from .serializers import UserSerializer, CountrySerializer, StateSerializer, CitySerializer
 from .constants import INSERT_ONE_DATA, INSERT_MANY_DATA
-from .authenticate import CustomAuthentication, create_access_token, create_refresh_token
+from .authenticate import IsOwner
 
 class UserListPagination(CursorPagination):
     ordering = '-date_joined'
@@ -22,11 +23,11 @@ class SignInAPIView(generics.CreateAPIView):
     permission_classes = [AllowAny] 
 
     def get_tokens(self, user):
-        access_token = create_access_token(user.id)
-        refresh_token = create_refresh_token(user.id)
+        refresh_token = RefreshToken.for_user(user)
+        access_token = refresh_token.access_token
         return {
-            'access_token': access_token,
-            'refresh_token': refresh_token
+            'access_token': str(access_token),
+            'refresh_token': str(refresh_token)
         }
 
     def authenticate_user(self, username, password=None):
@@ -47,7 +48,6 @@ class SignInAPIView(generics.CreateAPIView):
             response.set_cookie(key='access_token', value=data['access_token'])
             response.set_cookie(key='refresh_token', value=data['refresh_token'])
             response.set_cookie(key='user_id', value=user.id)
-            data['csrf_token'] =  csrf.get_token(request)
             response.data = {"Success" : "Login successfully","data":data}  
             return response
         
@@ -55,9 +55,8 @@ class SignInAPIView(generics.CreateAPIView):
 
 
 class SignoutAPIView(generics.GenericAPIView):
-    # permission_classes = [IsAuthenticated]
-    authentication_classes=[CustomAuthentication]
-    print('jvhkj')
+    permission_classes=(IsAuthenticated,)
+
     def get(self, request, *args, **kwargs):
         response = Response()
         response.delete_cookie('access_token')
@@ -72,8 +71,7 @@ class UserListAPIView(generics.ListCreateAPIView):
     queryset = CustomUser.objects.all()
     serializer_class = UserSerializer
     pagination_class = UserListPagination
-    # permission_classes=[IsAuthenticated]
-    authentication_classes=[CustomAuthentication]
+    permission_classes=[IsAuthenticated]
 
     def create(self, request, *args, **kwargs):
         request.data['password'] = make_password(request.data['password'])
@@ -88,21 +86,15 @@ class UserDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     queryset = CustomUser.objects.all()
     serializer_class = UserSerializer
     permission_classes=[IsAuthenticated]
-
-
-class IsOwner(BasePermission):
-    def has_object_permission(self, request, view, obj):
-        return obj.my_user == request.user
     
 
 class CountryCreateListView(generics.ListCreateAPIView):
     queryset = Country.objects.all()
     serializer_class = CountrySerializer
-    permission_classes=[IsAuthenticated, IsOwner]
-    # authentication_classes=[CustomAuthentication]
-    
-    def create(self, *args, **kwargs):
+    permission_classes = [IsAuthenticated, IsOwner]
+    authentication_classes = [JWTAuthentication]
 
+    def create(self, *args, **kwargs):
         user = get_user_model().objects.get(id=self.request.COOKIES['user_id'])
         data = self.request.data
         data['my_user'] = user.id
@@ -110,11 +102,187 @@ class CountryCreateListView(generics.ListCreateAPIView):
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+    
+    def get(self, request, *args, **kwargs):
+        user = get_user_model().objects.get(id=request.COOKIES['user_id'])
+        country = Country.objects.all().filter(my_user=user.id)
+        serializer = CountrySerializer(country, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 class CountryDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Country.objects.all()
     serializer_class = CountrySerializer
     permission_classes = [IsAuthenticated, IsOwner]
+    authentication_classes = [JWTAuthentication]
+
+    def get_object(self, request, pk):
+        try:
+            user_id = int(request.COOKIES['user_id'])
+            country =  Country.objects.get(pk=pk)
+            if country.my_user.id == user_id:
+                return country
+            else:
+                raise PermissionDenied(detail='You are not allowed to access this data', code=status.HTTP_401_UNAUTHORIZED) 
+        except Country.DoesNotExist:
+                raise PermissionDenied(detail='Country not found', code=status.HTTP_401_UNAUTHORIZED) 
+
+    def get(self, request, pk):
+        country = self.get_object(request, pk)
+        serializer = CountrySerializer(country)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+        
+    def patch(self, request, pk):
+        country = self.get_object(request, pk)
+        serializer = CountrySerializer(country, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        else:
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+    def delete(self, request, pk):
+        country = self.get_object(request, pk)
+        country.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+        
+
+class StateCreateListView(generics.ListCreateAPIView):
+    queryset = State.objects.all()
+    serializer_class = StateSerializer
+    permission_classes = [IsAuthenticated, IsOwner]
+
+    def verify_user(self, request, country_code):
+        user_id = int(request.COOKIES['user_id'])
+        country =  Country.objects.get(country_code=country_code)
+        if country.my_user.id == user_id:
+            return country
+        else:
+            raise PermissionDenied(detail='You are not allowed to access this data', code=status.HTTP_401_UNAUTHORIZED) 
+
+    def create(self, request, *args, **kwargs):
+        data = request.data
+        country = self.verify_user(request=request, country_code=data['country_code'])
+        data['country'] = country.id
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    
+    def get(self, request, *args, **kwargs):
+        user_id = request.COOKIES['user_id']
+        country = Country.objects.get(my_user=user_id)
+        self.verify_user(request=request, country_code=country.country_code)
+        state = State.objects.all().filter(country=country.id)
+        serializer = StateSerializer(state, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+class StateDetailAPIView(generics.RetrieveDestroyAPIView):
+    queryset = State.objects.all()
+    serializer_class = StateSerializer
+    permission_classes = [IsAuthenticated, IsOwner]
+
+    def get_object(self, request, pk):
+        try:
+            user_id = int(request.COOKIES['user_id'])
+            state = State.objects.get(pk=pk)
+            country_user_id = Country.objects.get(id=state.country.id).my_user.id
+            if country_user_id == user_id:
+                return state
+            else:
+                raise PermissionDenied(detail='You are not allowed to access this data', code=status.HTTP_401_UNAUTHORIZED) 
+        except State.DoesNotExist:
+            raise PermissionDenied(detail='State not found', code=status.HTTP_404_NOT_FOUND) 
+
+    def get(self, request, pk):
+        state = self.get_object(request, pk)
+        serializer = StateSerializer(state)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    def patch(self, request, pk):
+        state = self.get_object(request, pk)
+        serializer = StateSerializer(state, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        else:
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+    def delete(self, request, pk):
+        state = self.get_object(request, pk)
+        state.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+class CityListCreateView(generics.ListCreateAPIView):
+    queryset = City.objects.all()
+    serializer_class = CitySerializer
+    permission_classes = [IsAuthenticated, IsOwner]
+
+    def verify_user(self, request, state_code):
+        user_id = int(request.COOKIES['user_id'])
+        state = State.objects.get(state_code=state_code)
+        if user_id == state.country.my_user.id:
+            return state
+        else:
+            raise PermissionDenied(detail='You are not allowed to access this data', code=status.HTTP_401_UNAUTHORIZED) 
+
+    def create(self, request):
+        data = request.data
+        state = self.verify_user(request, data['state_code'])
+        data['state'] = state.id
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    
+    def get(self, request):
+        user_id = request.COOKIES['user_id']
+        city = City.objects.filter(state__country__my_user=user_id)
+        self.verify_user(request=request, state_code=city[0].state.state_code)
+        serializer = CitySerializer(city, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+class CityDetailView(generics.RetrieveDestroyAPIView):
+    queryset = City.objects.all()
+    serializer_class = CitySerializer
+    permission_classes = [IsAuthenticated, IsOwner]
+
+    def get_object(self, request, pk):
+        try:   
+            user_id = int(request.COOKIES['user_id'])
+            city = City.objects.get(pk=pk)
+            city_user_id = city.state.country.my_user.id
+            if city_user_id == user_id:
+                return city
+            else:
+                raise PermissionDenied(detail='You are not allowed to access this data', code=status.HTTP_401_UNAUTHORIZED) 
+        except City.DoesNotExist:
+            raise PermissionDenied(detail='State not found', code=status.HTTP_404_NOT_FOUND) 
+
+    def get(self, request, pk):
+        city = self.get_object(request, pk)
+        serializer = CitySerializer(city)
+        return Response(serializer.data, status=status.HTTP_200_OK) 
+
+    def patch(self, request, pk):
+        city = self.get_object(request, pk)
+        serializer = CitySerializer(city, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        else:
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST) 
+
+    def delete(self, request, pk):
+        city = self.get_object(request, pk)
+        city.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+        
+        
+
+
 
 # def insert(request):
 #     # country = INSERT_ONE_DATA['country']
